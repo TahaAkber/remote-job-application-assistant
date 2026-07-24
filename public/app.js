@@ -1,5 +1,6 @@
 let state = {};
 let visibleCount = 40;
+const LOCAL_KEY = 'taha-job-assistant-state-v1';
 const $ = (selector, root = document) => root.querySelector(selector);
 
 async function request(url, options = {}) {
@@ -10,6 +11,15 @@ async function request(url, options = {}) {
 }
 function escapeHtml(value = '') { const element = document.createElement('div'); element.textContent = value; return element.innerHTML; }
 function formatDate(value) { return value ? new Date(value).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Date not supplied'; }
+function localData() { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)) || {}; } catch { return {}; } }
+function saveLocal() { localStorage.setItem(LOCAL_KEY, JSON.stringify({ profile: state.profile, settings: state.settings, applications: state.applications })); }
+function clientEmailDraft(profile, job) {
+  return {
+    to: job.applicationEmail,
+    subject: `Application for ${job.title} - ${profile.fullName || 'Taha Akber'}`,
+    body: `Hello ${job.company} hiring team,\n\nI am applying for the ${job.title} position. I build full-stack applications with React, Next.js, Remix and Node.js, including REST/GraphQL integrations and PostgreSQL, MySQL and SQL Server databases. I also have experience with React Native and Shopify applications.\n\nMy CV is attached for your review.\nGitHub: ${profile.github || ''}\nLinkedIn: ${profile.linkedin || ''}\nPortfolio: ${profile.portfolio || ''}\n\nBest regards,\n${profile.fullName || 'Taha Akber'}`
+  };
+}
 function switchTab(id) {
   document.querySelectorAll('.tab').forEach(element => element.classList.toggle('active', element.id === id));
   document.querySelectorAll('nav button').forEach(element => element.classList.toggle('active', element.dataset.tab === id));
@@ -17,9 +27,10 @@ function switchTab(id) {
 function filteredJobs() {
   const term = $('#job-search').value.trim().toLowerCase();
   const source = $('#source-filter').value;
+  const queued = new Set((state.applications || []).map(application => application.jobId));
   return (state.recommendedJobs || []).filter(job => {
     const text = `${job.title} ${job.company} ${job.country} ${job.skills} ${job.description}`.toLowerCase();
-    return (!term || text.includes(term)) && (!source || job.source === source);
+    return !queued.has(job.id) && (!term || text.includes(term)) && (!source || job.source === source);
   });
 }
 function renderJobs() {
@@ -45,8 +56,13 @@ function renderJobs() {
     $('.apply-link', node).href = job.url;
     $('.email-available', node).textContent = job.applicationEmail ? `Email application: ${job.applicationEmail}` : '';
     $('.queue-btn', node).onclick = async () => {
-      await request('/api/applications', { method: 'POST', body: JSON.stringify({ jobId: job.id }) });
-      await load(); switchTab('queue');
+      if (state.storageMode === 'browser') {
+        state.applications.unshift({ id: crypto.randomUUID(), jobId: job.id, status: 'ready_for_review', emailDraft: null, createdAt: new Date().toISOString() });
+        saveLocal(); render();
+      } else {
+        await request('/api/applications', { method: 'POST', body: JSON.stringify({ jobId: job.id }) }); await load();
+      }
+      switchTab('queue');
     };
     list.append(node);
   });
@@ -71,9 +87,16 @@ function renderQueue() {
     const actionButton = $('[data-action]', row);
     if (actionButton) actionButton.onclick = async () => {
       const actionName = actionButton.dataset.action;
-      if (actionName === 'draft') await request(`/api/applications/${application.id}/email-draft`, { method: 'POST' });
-      else await request(`/api/applications/${application.id}/${actionName}`, { method: 'POST' });
-      await load();
+      if (state.storageMode === 'browser') {
+        if (actionName === 'approve') application.status = 'approved';
+        if (actionName === 'submit') application.status = 'submitted';
+        if (actionName === 'draft') application.emailDraft = clientEmailDraft(state.profile || {}, job);
+        saveLocal(); render();
+      } else {
+        if (actionName === 'draft') await request(`/api/applications/${application.id}/email-draft`, { method: 'POST' });
+        else await request(`/api/applications/${application.id}/${actionName}`, { method: 'POST' });
+        await load();
+      }
     };
     const copyButton = $('[data-copy]', row);
     if (copyButton) copyButton.onclick = async () => { await navigator.clipboard.writeText(`${application.emailDraft.subject}\n\n${application.emailDraft.body}`); copyButton.textContent = 'Copied'; };
@@ -87,7 +110,16 @@ function renderProfile() {
   if (profile.cvFileName) $('#cv-status').textContent = `${profile.cvFileName} loaded.`;
 }
 function render() { renderJobs(); renderQueue(); renderProfile(); }
-async function load() { state = await request('/api/state'); render(); }
+async function load() {
+  state = await request('/api/state');
+  if (state.storageMode === 'browser') {
+    const saved = localData();
+    state.profile = saved.profile || state.profile || {};
+    state.settings = { ...(state.settings || {}), ...(saved.settings || {}) };
+    state.applications = (saved.applications || []).filter(application => state.jobs.some(job => job.id === application.jobId));
+  }
+  render();
+}
 
 document.querySelectorAll('nav button').forEach(button => button.onclick = () => switchTab(button.dataset.tab));
 $('#job-search').oninput = () => { visibleCount = 40; renderJobs(); };
@@ -105,14 +137,24 @@ $('#cv-file').onchange = async event => {
   try {
     const form = new FormData(); form.append('cv', file);
     const response = await fetch('/api/profile/cv', { method: 'POST', body: form }); const data = await response.json();
-    if (!response.ok) throw new Error(data.error); status.textContent = `${data.fileName} uploaded.`; await load();
+    if (!response.ok) throw new Error(data.error);
+    if (state.storageMode === 'browser') { state.profile = { ...(state.profile || {}), cvSummary: data.cvSummary, cvFileName: data.fileName }; saveLocal(); render(); }
+    else await load();
+    status.textContent = `${data.fileName} uploaded.`;
   } catch (error) { status.textContent = error.message; }
 };
 $('#profile-form').onsubmit = async event => {
   event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget));
   const dailyApplicationLimit = Number(data.dailyApplicationLimit); delete data.dailyApplicationLimit; delete data.cv;
-  await request('/api/profile', { method: 'PUT', body: JSON.stringify(data) });
-  await request('/api/settings', { method: 'PUT', body: JSON.stringify({ dailyApplicationLimit }) });
-  $('#profile-status').textContent = 'Saved.'; await load();
+  if (state.storageMode === 'browser') {
+    state.profile = { ...(state.profile || {}), ...data };
+    state.settings = { ...(state.settings || {}), dailyApplicationLimit };
+    saveLocal(); render();
+  } else {
+    await request('/api/profile', { method: 'PUT', body: JSON.stringify(data) });
+    await request('/api/settings', { method: 'PUT', body: JSON.stringify({ dailyApplicationLimit }) });
+    await load();
+  }
+  $('#profile-status').textContent = 'Saved.';
 };
 load().catch(error => alert(error.message));

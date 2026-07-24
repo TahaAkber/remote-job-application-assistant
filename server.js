@@ -179,7 +179,8 @@ async function api(req, res, url) {
   return send(res, 404, { error: 'Not found.' });
 }
 function serveStatic(req, res, pathname) {
-  const requested = pathname === '/' ? '/public/index.html' : pathname;
+  const publicAsset = ['/app.js', '/styles.css'].includes(pathname) ? `/public${pathname}` : pathname;
+  const requested = pathname === '/' ? '/public/index.html' : publicAsset;
   const target = path.normalize(path.join(ROOT, requested));
   if (!target.startsWith(ROOT) || !fs.existsSync(target) || fs.statSync(target).isDirectory()) { res.writeHead(404); return res.end('Not found'); }
   const ext = path.extname(target); const types = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };

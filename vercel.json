@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/api/jobs/refresh", "destination": "/api/jobs-refresh" },
+    { "source": "/api/profile/cv", "destination": "/api/profile-cv" }
+  ]
+}
