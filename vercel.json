@@ -6,6 +6,7 @@
     }
   },
   "rewrites": [
+    { "source": "/", "destination": "/index.html" },
     { "source": "/api/jobs/refresh", "destination": "/api/jobs-refresh" },
     { "source": "/api/profile/cv", "destination": "/api/profile-cv" }
   ]

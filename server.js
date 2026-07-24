@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { randomUUID } = require('crypto');
 const { PDFParse } = require('pdf-parse');
 const { fetchLiveJobs, validateLiveUrls } = require('./job-sources');
@@ -8,7 +9,7 @@ const { rankedJobs } = require('./matcher');
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.VERCEL ? path.join(os.tmpdir(), 'taha-job-assistant') : path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 const CV_DIR = path.join(DATA_DIR, 'cv');
 
@@ -113,9 +114,13 @@ function makeEmailDraft(profile, job) {
   };
 }
 async function api(req, res, url) {
-  const store = readStore();
+  let store = readStore();
   if (req.method === 'GET' && url.pathname === '/api/state') {
-    return send(res, 200, { ...store, recommendedJobs: eligibleJobs(store) });
+    if (process.env.VERCEL && !store.jobSearch.lastRefreshedAt) {
+      await refreshJobs();
+      store = readStore();
+    }
+    return send(res, 200, { ...store, storageMode: process.env.VERCEL ? 'browser' : undefined, recommendedJobs: eligibleJobs(store) });
   }
   if (req.method === 'POST' && url.pathname === '/api/jobs/refresh') {
     const result = await refreshJobs();
