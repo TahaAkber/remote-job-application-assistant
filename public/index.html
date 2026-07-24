@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Taha's Remote Job Assistant</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <p class="eyebrow">LIVE REMOTE JOB SEARCH</p>
+      <h1>Remote Job Assistant</h1>
+      <p>Current English-language roles matched to your CV across worldwide remote teams.</p>
+    </div>
+    <div class="badge"><strong id="match-count">0</strong><br>CV matches</div>
+  </header>
+
+  <section class="notice">Jobs refresh from live public feeds every 24 hours while the app is running. Application emails are prepared only when a listing explicitly publishes an application address.</section>
+
+  <nav>
+    <button data-tab="jobs" class="active">Live jobs</button>
+    <button data-tab="queue">Application queue</button>
+    <button data-tab="profile">Profile</button>
+  </nav>
+
+  <section id="jobs" class="tab active">
+    <div class="toolbar card">
+      <div><h2>CV-matched remote roles</h2><p id="refresh-status" class="muted">Checking live sources…</p></div>
+      <button id="refresh-jobs">Refresh live jobs</button>
+    </div>
+    <div class="filters">
+      <input id="job-search" type="search" placeholder="Filter by title, company, skill or location">
+      <select id="source-filter"><option value="">All sources</option><option>Remotive</option><option>Arbeitnow</option><option>RemoteOK</option><option>Himalayas</option><option>Jobicy</option></select>
+    </div>
+    <div id="recommended" class="items"></div>
+    <button id="load-more" class="secondary hidden">Show more jobs</button>
+  </section>
+
+  <section id="queue" class="tab">
+    <div class="card">
+      <h2>Application queue</h2>
+      <p class="muted">Review each job first. For email applications, the app creates a truthful draft using your CV and links; it does not harvest unrelated addresses.</p>
+      <div id="queue-list" class="items"></div>
+    </div>
+  </section>
+
+  <section id="profile" class="tab">
+    <div class="card"><h2>Your profile</h2>
+      <form id="profile-form" class="grid">
+        <label>Full name<input name="fullName" required></label>
+        <label>Email<input name="email" type="email"></label>
+        <label>GitHub URL<input name="github" type="url"></label>
+        <label>LinkedIn URL<input name="linkedin" type="url"></label>
+        <label>Portfolio URL<input name="portfolio" type="url"></label>
+        <label>Daily review limit<input name="dailyApplicationLimit" type="number" min="1" max="50"></label>
+        <label class="wide">Upload CV (PDF)<input id="cv-file" type="file" accept="application/pdf,.pdf"><small id="cv-status">PDF text is extracted locally for matching.</small></label>
+        <label class="wide">Extracted CV text<textarea name="cvSummary" rows="8"></textarea></label>
+        <div class="wide actions"><button>Save profile</button><span id="profile-status"></span></div>
+      </form>
+    </div>
+  </section>
+</main>
+
+<template id="job-template">
+  <article class="item job-card">
+    <div class="job-main">
+      <div class="job-heading"><h3></h3><span class="score"></span></div>
+      <p class="meta"></p>
+      <p class="description"></p>
+      <div class="job-links"><a class="apply-link" target="_blank" rel="noreferrer">Open official listing ↗</a><span class="email-available"></span></div>
+    </div>
+    <button class="queue-btn">Add to review queue</button>
+  </article>
+</template>
+<script src="/public/app.js"></script>
+</body>
+</html>
