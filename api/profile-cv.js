@@ -1,4 +1,5 @@
 const { PDFParse } = require('pdf-parse');
+const { profileHints } = require('../profile-hints');
 
 function rawBody(req) {
   return new Promise((resolve, reject) => {
@@ -29,7 +30,12 @@ module.exports = async function handler(req, res) {
     const result = await parser.getText(); await parser.destroy();
     const text = (result.text || '').replace(/\s{3,}/g, '\n').trim();
     if (!text) return res.status(422).json({ error: 'No selectable text was found in this PDF.' });
-    return res.status(200).json({ fileName: upload.filename, extractedCharacters: text.length, cvSummary: text });
+    return res.status(200).json({
+      fileName: upload.filename,
+      extractedCharacters: text.length,
+      cvSummary: text,
+      extractedProfile: profileHints(text)
+    });
   } catch (error) {
     return res.status(500).json({ error: error.message || 'PDF extraction failed.' });
   }

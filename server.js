@@ -3,9 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { randomUUID } = require('crypto');
+const { spawn } = require('child_process');
 const { PDFParse } = require('pdf-parse');
 const { fetchLiveJobs, validateLiveUrls } = require('./job-sources');
 const { rankedJobs } = require('./matcher');
+const { profileHints } = require('./profile-hints');
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
@@ -14,7 +16,10 @@ const DATA_FILE = path.join(DATA_DIR, 'store.json');
 const CV_DIR = path.join(DATA_DIR, 'cv');
 
 const initialData = {
-  profile: { fullName: '', email: '', cvSummary: '', cvFileName: '', github: '', linkedin: '', portfolio: '', answers: {} },
+  profile: {
+    fullName: '', email: '', phone: '', currentLocation: '', noticePeriod: '', salaryExpectation: '',
+    workAuthorization: '', cvSummary: '', cvFileName: '', github: '', linkedin: '', portfolio: '', answers: {}
+  },
   jobs: [],
   applications: [],
   jobSearch: { lastRefreshedAt: null, lastError: null, sourceErrors: [], rawCount: 0, matchedCount: 0 },
@@ -29,15 +34,19 @@ function ensureStore() {
 function readStore() {
   ensureStore();
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  const profile = { ...initialData.profile, ...(saved.profile || {}) };
+  const hints = profileHints(profile.cvSummary);
+  for (const [key, value] of Object.entries(hints)) if (!profile[key] && value) profile[key] = value;
   return {
     ...initialData,
     ...saved,
-    profile: { ...initialData.profile, ...(saved.profile || {}) },
+    profile,
     settings: { ...initialData.settings, ...(saved.settings || {}) },
     jobSearch: { ...initialData.jobSearch, ...(saved.jobSearch || {}) }
   };
 }
 function writeStore(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
+function matchingProfileText(profile) { return `${profile.cvSummary || ''}\n${profile.currentLocation || ''}`.trim(); }
 function send(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
@@ -71,14 +80,14 @@ function readMultipartFile(buffer, contentType) {
 function eligibleJobs(store) {
   const today = new Date().toISOString().slice(0, 10);
   const alreadyQueued = new Set(store.applications.map(a => a.jobId));
-  return rankedJobs(store.jobs)
+  return rankedJobs(store.jobs, matchingProfileText(store.profile))
     .filter(j => j.english !== false && !alreadyQueued.has(j.id) && (!j.deadline || j.deadline >= today));
 }
 async function refreshJobs() {
   const store = readStore();
   try {
     const result = await fetchLiveJobs();
-    const matches = await validateLiveUrls(rankedJobs(result.jobs));
+    const matches = await validateLiveUrls(rankedJobs(result.jobs, matchingProfileText(store.profile)));
     const existingIds = new Map(store.jobs.filter(job => job.externalId).map(job => [job.externalId, job.id]));
     const linkedIds = new Set(store.applications.map(application => application.jobId));
     const preserved = store.jobs.filter(job => job.source === 'Manual' || linkedIds.has(job.id));
@@ -140,8 +149,12 @@ async function api(req, res, url) {
     await parser.destroy();
     const extracted = (result.text || '').replace(/\s{3,}/g, '\n').trim();
     if (!extracted) return send(res, 422, { error: 'No selectable text was found in this PDF. Please use a text-based PDF.' });
-    store.profile.cvSummary = extracted; store.profile.cvFileName = upload.filename; writeStore(store);
-    return send(res, 200, { fileName: upload.filename, extractedCharacters: extracted.length, cvSummary: extracted });
+    const extractedProfile = profileHints(extracted);
+    store.profile.cvSummary = extracted;
+    store.profile.cvFileName = upload.filename;
+    for (const [key, value] of Object.entries(extractedProfile)) if (!store.profile[key] && value) store.profile[key] = value;
+    writeStore(store);
+    return send(res, 200, { fileName: upload.filename, extractedCharacters: extracted.length, cvSummary: extracted, extractedProfile });
   }
   if (req.method === 'PUT' && url.pathname === '/api/settings') {
     store.settings = { ...store.settings, ...(await body(req)) }; writeStore(store); return send(res, 200, store.settings);
@@ -151,6 +164,37 @@ async function api(req, res, url) {
     if (!job.title || !job.company || !job.url || !job.country) return send(res, 400, { error: 'title, company, country and url are required.' });
     const saved = { id: randomUUID(), title: job.title, company: job.company, country: job.country, url: job.url, description: job.description || '', skills: job.skills || '', english: job.english !== false, source: job.source || 'Manual', createdAt: new Date().toISOString() };
     store.jobs.unshift(saved); writeStore(store); return send(res, 201, saved);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/applications/batch') {
+    const today = new Date().toISOString().slice(0, 10);
+    const usedToday = store.applications.filter(application => application.createdAt?.slice(0, 10) === today).length;
+    const remaining = Math.max(0, Number(store.settings.dailyApplicationLimit || 5) - usedToday);
+    const queued = eligibleJobs(store).slice(0, remaining).map(job => ({
+      id: randomUUID(),
+      jobId: job.id,
+      status: 'ready_for_review',
+      note: '',
+      emailDraft: null,
+      createdAt: new Date().toISOString(),
+      approvedAt: null,
+      submittedAt: null
+    }));
+    store.applications.unshift(...queued);
+    writeStore(store);
+    return send(res, 201, { queuedCount: queued.length, dailyRemaining: Math.max(0, remaining - queued.length) });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/applications/autofill-batch') {
+    if (process.env.VERCEL) return send(res, 409, { error: 'Browser autofill is available only in the local app.' });
+    const pending = store.applications.filter(item => ['approved', 'ready_for_review'].includes(item.status));
+    if (!pending.length) return send(res, 409, { error: 'There are no pending applications to autofill.' });
+    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--queue'], {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+    return send(res, 202, { started: true, applicationCount: pending.length });
   }
   if (req.method === 'POST' && url.pathname === '/api/applications') {
     const { jobId, note = '' } = await body(req);
@@ -168,6 +212,20 @@ async function api(req, res, url) {
     if (!job.applicationEmail) return send(res, 409, { error: 'This listing does not publish an application email. Use its official application link.' });
     application.emailDraft = makeEmailDraft(store.profile, job);
     writeStore(store); return send(res, 200, application.emailDraft);
+  }
+  const autofillMatch = url.pathname.match(/^\/api\/applications\/([\w-]+)\/autofill$/);
+  if (req.method === 'POST' && autofillMatch) {
+    if (process.env.VERCEL) return send(res, 409, { error: 'Browser autofill is available only in the local app.' });
+    const application = store.applications.find(item => item.id === autofillMatch[1]);
+    if (!application) return send(res, 404, { error: 'Application not found.' });
+    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--application', application.id], {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+    return send(res, 202, { started: true });
   }
   const applicationMatch = url.pathname.match(/^\/api\/applications\/([\w-]+)\/(approve|submit)$/);
   if (req.method === 'POST' && applicationMatch) {

@@ -17,7 +17,7 @@
     <div class="badge"><strong id="match-count">0</strong><br>CV matches</div>
   </header>
 
-  <section class="notice">Jobs refresh from live public feeds every 24 hours while the app is running. Application emails are prepared only when a listing explicitly publishes an application address.</section>
+  <section class="notice">CV matching and the review queue are automated. Final submission stays under your control so every answer remains accurate.</section>
 
   <nav>
     <button data-tab="jobs" class="active">Live jobs</button>
@@ -28,11 +28,15 @@
   <section id="jobs" class="tab active">
     <div class="toolbar card">
       <div><h2>CV-matched remote roles</h2><p id="refresh-status" class="muted">Checking live sources…</p></div>
-      <button id="refresh-jobs">Refresh live jobs</button>
+      <div class="toolbar-actions"><button id="queue-top">Queue today’s top matches</button><button id="refresh-jobs" class="secondary-inline">Refresh live jobs</button></div>
     </div>
     <div class="filters">
       <input id="job-search" type="search" placeholder="Filter by title, company, skill or location">
-      <select id="source-filter"><option value="">All sources</option><option>Remotive</option><option>Arbeitnow</option><option>RemoteOK</option><option>Himalayas</option><option>Jobicy</option></select>
+      <select id="source-filter"><option value="">All sources</option><option>We Work Remotely</option><option>Jobspresso</option><option>Remotive</option><option>Arbeitnow</option><option>RemoteOK</option><option>Himalayas</option><option>Jobicy</option></select>
+    </div>
+    <div class="source-access card">
+      <div><strong>Automated public feeds</strong><span>We Work Remotely and Jobspresso</span></div>
+      <div><strong>Open manually</strong><span><a href="https://www.virtualvocations.com/q-remote-software-development-jobs.html" target="_blank" rel="noreferrer">Virtual Vocations ↗</a> · <a href="https://www.flexjobs.com/remote-jobs/developer" target="_blank" rel="noreferrer">FlexJobs ↗</a></span></div>
     </div>
     <div id="recommended" class="items"></div>
     <button id="load-more" class="secondary hidden">Show more jobs</button>
@@ -40,7 +44,7 @@
 
   <section id="queue" class="tab">
     <div class="card">
-      <h2>Application queue</h2>
+      <div class="toolbar"><h2>Application queue</h2><button id="autofill-queue">Autofill all queued forms</button></div>
       <p class="muted">Review each job first. For email applications, the app creates a truthful draft using your CV and links; it does not harvest unrelated addresses.</p>
       <div id="queue-list" class="items"></div>
     </div>
@@ -51,13 +55,18 @@
       <form id="profile-form" class="grid">
         <label>Full name<input name="fullName" required></label>
         <label>Email<input name="email" type="email"></label>
+        <label>Phone<input name="phone" type="tel"></label>
+        <label>Current location<input name="currentLocation" placeholder="City, country"></label>
+        <label>Notice period<input name="noticePeriod" placeholder="e.g. 2 weeks"></label>
+        <label>Salary expectation<input name="salaryExpectation" placeholder="e.g. USD 2,500/month"></label>
+        <label class="wide">Work authorization / location eligibility<input name="workAuthorization" placeholder="e.g. Based in Pakistan; available as an international remote contractor"></label>
         <label>GitHub URL<input name="github" type="url"></label>
         <label>LinkedIn URL<input name="linkedin" type="url"></label>
         <label>Portfolio URL<input name="portfolio" type="url"></label>
         <label>Daily review limit<input name="dailyApplicationLimit" type="number" min="1" max="50"></label>
         <label class="wide">Upload CV (PDF)<input id="cv-file" type="file" accept="application/pdf,.pdf"><small id="cv-status">PDF text is extracted locally for matching.</small></label>
         <label class="wide">Extracted CV text<textarea name="cvSummary" rows="8"></textarea></label>
-        <div class="wide actions"><button>Save profile</button><span id="profile-status"></span></div>
+        <div class="wide actions"><button>Save profile</button><button id="copy-profile" type="button" class="secondary-inline">Copy reusable answers</button><span id="profile-status"></span></div>
       </form>
     </div>
   </section>

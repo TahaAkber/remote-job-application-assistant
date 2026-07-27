@@ -5,9 +5,12 @@
   "description": "Human-in-the-loop job discovery and application workspace",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "autofill": "node auto-apply.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.62.0"
   }
 }

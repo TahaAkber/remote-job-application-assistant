@@ -1,7 +1,20 @@
 const USER_AGENT = 'TahaJobAssistant/1.0 (+local personal job search)';
 
-function cleanHtml(value = '') {
+function decodeXml(value = '') {
   return String(value)
+    .replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i, '$1')
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;|&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function cleanHtml(value = '') {
+  return decodeXml(value)
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
@@ -11,6 +24,16 @@ function cleanHtml(value = '') {
     .replace(/&#39;/gi, "'")
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function xmlValue(item, tag) {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = item.match(new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapedTag}>`, 'i'));
+  return decodeXml(match?.[1] || '').trim();
+}
+
+function rssItems(xml) {
+  return [...String(xml).matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)].map(match => match[1]);
 }
 
 function applicationEmail(description = '') {
@@ -30,6 +53,70 @@ async function getJson(url) {
   });
   if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
   return response.json();
+}
+
+async function getText(url) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/rss+xml, application/xml, text/xml;q=0.9' },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
+      return response.text();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function fromWeWorkRemotely(item) {
+  const combinedTitle = cleanHtml(xmlValue(item, 'title'));
+  const separator = combinedTitle.indexOf(':');
+  const company = separator > 0 ? combinedTitle.slice(0, separator).trim() : 'Company shown on listing';
+  const title = separator > 0 ? combinedTitle.slice(separator + 1).trim() : combinedTitle;
+  const descriptionHtml = xmlValue(item, 'description');
+  const url = xmlValue(item, 'link') || xmlValue(item, 'guid');
+  return {
+    externalId: `wwr:${xmlValue(item, 'guid') || url}`,
+    title,
+    company,
+    country: cleanHtml(xmlValue(item, 'region') || xmlValue(item, 'country')) || 'Remote / check listing',
+    url,
+    description: cleanHtml(descriptionHtml),
+    skills: cleanHtml(xmlValue(item, 'skills') || xmlValue(item, 'category')),
+    source: 'We Work Remotely',
+    sourceUrl: 'https://weworkremotely.com/',
+    remote: true,
+    publishedAt: xmlValue(item, 'pubDate') || null,
+    employmentType: cleanHtml(xmlValue(item, 'type')),
+    applicationEmail: applicationEmail(descriptionHtml)
+  };
+}
+
+function fromJobspresso(item) {
+  const descriptionHtml = xmlValue(item, 'content:encoded') || xmlValue(item, 'description');
+  const url = xmlValue(item, 'link');
+  return {
+    externalId: `jobspresso:${xmlValue(item, 'guid') || url}`,
+    title: cleanHtml(xmlValue(item, 'title')),
+    company: cleanHtml(xmlValue(item, 'job_listing:company')) || 'Company shown on listing',
+    country: cleanHtml(xmlValue(item, 'job_listing:location')) || 'Remote / check listing',
+    url,
+    description: cleanHtml(descriptionHtml),
+    skills: [
+      cleanHtml(xmlValue(item, 'job_listing:job_type')),
+      cleanHtml(xmlValue(item, 'job_listing:job_category'))
+    ].filter(Boolean).join(', '),
+    source: 'Jobspresso',
+    sourceUrl: 'https://jobspresso.co/remote-work/',
+    remote: true,
+    publishedAt: xmlValue(item, 'pubDate') || null,
+    employmentType: cleanHtml(xmlValue(item, 'job_listing:job_category')),
+    applicationEmail: applicationEmail(descriptionHtml)
+  };
 }
 
 function fromRemotive(job) {
@@ -155,10 +242,31 @@ async function fetchJobicy() {
   return results.flatMap(result => result.jobs || []).map(fromJobicy);
 }
 
+async function fetchWeWorkRemotely() {
+  const xml = await getText('https://weworkremotely.com/categories/remote-programming-jobs.rss');
+  return rssItems(xml).map(fromWeWorkRemotely).filter(job => job.title && job.url);
+}
+
+async function fetchJobspresso() {
+  const xml = await getText('https://jobspresso.co/?feed=job_feed&job_types=developer');
+  return rssItems(xml).map(fromJobspresso).filter(job => job.title && job.url);
+}
+
 async function fetchLiveJobs() {
-  const settled = await Promise.allSettled([fetchRemotive(), fetchArbeitnow(), fetchRemoteOk(), fetchHimalayas(), fetchJobicy()]);
+  const sources = [
+    ['Remotive', fetchRemotive],
+    ['Arbeitnow', fetchArbeitnow],
+    ['RemoteOK', fetchRemoteOk],
+    ['Himalayas', fetchHimalayas],
+    ['Jobicy', fetchJobicy],
+    ['We Work Remotely', fetchWeWorkRemotely],
+    ['Jobspresso', fetchJobspresso]
+  ];
+  const settled = await Promise.allSettled(sources.map(([, load]) => load()));
   const jobs = settled.flatMap(result => result.status === 'fulfilled' ? result.value : []);
-  const errors = settled.filter(result => result.status === 'rejected').map(result => result.reason.message);
+  const errors = settled.flatMap((result, index) => result.status === 'rejected'
+    ? [`${sources[index][0]}: ${result.reason.message}`]
+    : []);
   if (!jobs.length) throw new Error(`All job sources failed${errors.length ? `: ${errors.join('; ')}` : ''}`);
   const unique = new Map();
   for (const job of jobs) {
