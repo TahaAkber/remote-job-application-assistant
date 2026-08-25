@@ -48,22 +48,24 @@ function loadInput() {
     .map(name => ({ name, path: path.join(CV_DIR, name), modified: fs.statSync(path.join(CV_DIR, name)).mtimeMs }))
     .sort((a, b) => b.modified - a.modified);
   if (!cvFiles.length) throw new Error('No saved PDF CV was found. Upload it in the Profile tab first.');
-  return { store, items, cvPath: cvFiles[0].path };
+  return { store, items, cvPath: cvFiles[0].path, runId: argument('--run-id') };
 }
 
 async function fieldText(locator) {
   return normalized(await locator.evaluate(element => {
     const labels = element.labels ? [...element.labels].map(label => label.innerText).join(' ') : '';
-    return `${labels} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('placeholder') || ''} ${element.getAttribute('name') || ''} ${element.id || ''}`;
+    const nearby = element.closest('label, .form-field, .field, [class*="question"]');
+    return `${labels} ${nearby?.innerText || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('placeholder') || ''} ${element.getAttribute('autocomplete') || ''} ${element.getAttribute('name') || ''} ${element.id || ''}`;
   }));
 }
 
 function answerFor(text, profile) {
+  if (/company.?name|employer.?name|organization.?name/.test(text)) return '';
   const names = (profile.fullName || '').trim().split(/\s+/);
   const rules = [
     [/\bfirst.?name\b|given.?name/, names[0] || ''],
     [/\blast.?name\b|surname|family.?name/, names.slice(1).join(' ')],
-    [/\bfull.?name\b|candidate.?name|applicant.?name|^name$/, profile.fullName],
+    [/\bfull.?name\b|candidate.?name|applicant.?name|\bname\b/, profile.fullName],
     [/\be-?mail\b/, profile.email],
     [/\bphone\b|mobile|telephone/, profile.phone],
     [/linkedin/, profile.linkedin],
@@ -99,6 +101,54 @@ async function fillInputs(page, profile, cvPath, actions) {
     await input.fill(answer);
     actions.push(`Filled ${text.slice(0, 70)}`);
   }
+}
+
+async function applicationFieldCount(page) {
+  let count = 0;
+  for (const frame of page.frames()) {
+    count += await frame.locator([
+      'input:not([type="hidden"]):not([type="search"]):not([type="submit"]):not([type="button"]):visible',
+      'textarea:visible',
+      'select:visible'
+    ].join(', ')).count().catch(() => 0);
+  }
+  return count;
+}
+
+async function isLoginGate(page) {
+  if (/\/(login|sign-?in|register|sign-?up)(\/|\?|$)/i.test(page.url())) return true;
+  return page.locator('input[type="password"]:visible').count().then(count => count > 0).catch(() => false);
+}
+
+function applyCandidateScore(candidate) {
+  const text = normalized(candidate.text);
+  const href = normalized(candidate.href);
+  if (/auto.?apply|ai auto|sign.?up|create account/.test(text)) return -100;
+  let score = 0;
+  if (/^apply (now|for this job|to this job)$/.test(text)) score += 100;
+  else if (/^apply$|^application$/.test(text)) score += 80;
+  else if (/apply/.test(text)) score += 35;
+  if (/continue without (an )?account|continue as guest|skip.*continue/.test(text)) score += 120;
+  if (/apply|career|jobs|greenhouse|lever|ashby|workable|smartrecruiters/.test(href)) score += 20;
+  return score;
+}
+
+async function bestApplyCandidate(page) {
+  const candidates = page.locator('a:visible, button:visible, [role="button"]:visible');
+  const values = [];
+  const count = Math.min(await candidates.count(), 250);
+  for (let index = 0; index < count; index += 1) {
+    const locator = candidates.nth(index);
+    const value = await locator.evaluate(element => ({
+      text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('title') || '').trim(),
+      href: element.href || ''
+    })).catch(() => null);
+    if (!value) continue;
+    const score = applyCandidateScore(value);
+    if (score > 0) values.push({ locator, score, ...value });
+  }
+  values.sort((a, b) => b.score - a.score);
+  return values[0] || null;
 }
 
 async function fillCountrySelects(page, actions) {
@@ -147,21 +197,22 @@ async function requiredUnknowns(page) {
   );
 }
 
-async function openApplicationForm(page, originalUrl) {
+async function openApplicationForm(page, originalUrl, actions = []) {
   await page.goto(originalUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(1500);
-  if (await page.locator('form input:visible, form textarea:visible').first().isVisible().catch(() => false)) return page;
-  const apply = page.getByRole('link', { name: /apply|application/i }).last()
-    .or(page.getByRole('button', { name: /apply|application/i }).last());
-  if (await apply.isVisible().catch(() => false)) {
-    const popupPromise = page.context().waitForEvent('page', { timeout: 5000 }).catch(() => null);
-    await apply.click();
+  for (let step = 0; step < 4; step += 1) {
+    if (!(await isLoginGate(page)) && await applicationFieldCount(page) >= 2) return page;
+    const candidate = await bestApplyCandidate(page);
+    if (!candidate) break;
+    const beforeUrl = page.url();
+    const popupPromise = page.context().waitForEvent('page', { timeout: 4000 }).catch(() => null);
+    await candidate.locator.click({ timeout: 10000 });
+    actions.push(`Clicked ${candidate.text.slice(0, 70) || 'application link'}`);
     const popup = await popupPromise;
-    if (popup) {
-      await popup.waitForLoadState('domcontentloaded');
-      return popup;
-    }
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    if (popup) page = popup;
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    if (page.url() !== beforeUrl) actions.push(`Opened application page: ${page.url()}`);
   }
   return page;
 }
@@ -181,10 +232,36 @@ async function hasHumanVerification(page) {
     .catch(() => false);
 }
 
+async function notifyHumanVerification(page) {
+  try {
+    await page.context().grantPermissions(['notifications'], { origin: new URL(page.url()).origin });
+    await page.evaluate(() => {
+      new Notification('Job application needs verification', {
+        body: 'Complete the CAPTCHA in this tab. Autofill will resume automatically.'
+      });
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (AudioContext) {
+        const audio = new AudioContext();
+        const oscillator = audio.createOscillator();
+        const gain = audio.createGain();
+        oscillator.connect(gain);
+        gain.connect(audio.destination);
+        oscillator.frequency.value = 880;
+        gain.gain.value = 0.12;
+        oscillator.start();
+        oscillator.stop(audio.currentTime + 0.25);
+      }
+    });
+  } catch {
+    // Some sites disallow page notifications/audio; bringing the tab forward still works.
+  }
+}
+
 async function waitForHumanVerification(page, actions) {
   if (!(await hasHumanVerification(page))) return;
   actions.push('Paused for manual human verification');
   console.log(`\nHuman verification detected on ${page.url()}. Complete it in the open browser; autofill will resume automatically.`);
+  await notifyHumanVerification(page);
   await page.bringToFront();
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
@@ -197,18 +274,65 @@ async function waitForHumanVerification(page, actions) {
   throw new Error('Human verification was not completed within 10 minutes.');
 }
 
+function saveReport(report, application) {
+  fs.writeFileSync(path.join(REPORT_DIR, `${application?.id || Date.now()}.json`), JSON.stringify(report, null, 2));
+  return report;
+}
+
+function failedReport({ runId, application, job, page, actions, error }) {
+  return {
+    runId,
+    applicationId: application?.id || null,
+    job: `${job.title || ''} — ${job.company || ''}`.trim(),
+    pageUrl: page.url(),
+    filledAt: new Date().toISOString(),
+    actions,
+    unknownRequired: [],
+    readyForReview: false,
+    error: error.message
+  };
+}
+
+async function completeAutofill({ runId, application, job, page, actions, store, cvPath }) {
+  await waitForHumanVerification(page, actions);
+  if (await isLoginGate(page)) {
+    throw new Error('The job site requires you to sign in before its application form is available.');
+  }
+  const fieldCount = await applicationFieldCount(page);
+  if (fieldCount < 2) {
+    throw new Error('No application form was found after following the Apply flow. The listing may be expired or require a manual step.');
+  }
+  for (const frame of page.frames()) {
+    await fillInputs(frame, store.profile || {}, cvPath, actions);
+    await fillCountrySelects(frame, actions);
+    await acceptRequiredConsent(frame, actions);
+  }
+  const unknownRequired = (await Promise.all(page.frames().map(frame => requiredUnknowns(frame)))).flat();
+  return {
+    runId,
+    applicationId: application?.id || null,
+    job: `${job.title || ''} — ${job.company || ''}`.trim(),
+    pageUrl: page.url(),
+    filledAt: new Date().toISOString(),
+    actions,
+    unknownRequired,
+    readyForReview: unknownRequired.length === 0
+  };
+}
+
 async function main() {
-  const { store, items, cvPath } = loadInput();
+  const { store, items, cvPath, runId } = loadInput();
   if (items.every(({ job }) => isBlocked(job.url))) {
     throw new Error('Automation is disabled for the selected site by its current terms. Use the manual shortcut.');
   }
   const context = await chromium.launchPersistentContext(BROWSER_PROFILE, {
     headless: false,
     viewport: null,
-    args: ['--start-maximized']
+    args: ['--start-maximized', '--autoplay-policy=no-user-gesture-required']
   });
   const initialPage = context.pages()[0] || await context.newPage();
   const reports = [];
+  const verificationTasks = [];
   fs.mkdirSync(REPORT_DIR, { recursive: true });
   for (let index = 0; index < items.length; index += 1) {
     const { application, job } = items[index];
@@ -216,37 +340,21 @@ async function main() {
     const actions = [];
     try {
       if (isBlocked(job.url)) throw new Error('Automation is disabled for this site by its current terms.');
-      page = await openApplicationForm(page, job.url);
+      page = await openApplicationForm(page, job.url, actions);
       if (isBlocked(page.url())) throw new Error('The application redirected to a site where automation is disabled.');
-      await waitForHumanVerification(page, actions);
-      await fillInputs(page, store.profile || {}, cvPath, actions);
-      await fillCountrySelects(page, actions);
-      await acceptRequiredConsent(page, actions);
-      const unknownRequired = await requiredUnknowns(page);
-      const report = {
-        applicationId: application?.id || null,
-        job: `${job.title || ''} — ${job.company || ''}`.trim(),
-        pageUrl: page.url(),
-        filledAt: new Date().toISOString(),
-        actions,
-        unknownRequired,
-        readyForReview: unknownRequired.length === 0
-      };
-      reports.push(report);
-      fs.writeFileSync(path.join(REPORT_DIR, `${application?.id || Date.now()}.json`), JSON.stringify(report, null, 2));
+      const work = () => completeAutofill({ runId, application, job, page, actions, store, cvPath });
+      if (await hasHumanVerification(page)) {
+        verificationTasks.push(work()
+          .then(report => reports.push(saveReport(report, application)))
+          .catch(error => reports.push(saveReport(failedReport({ runId, application, job, page, actions, error }), application))));
+        continue;
+      }
+      reports.push(saveReport(await work(), application));
     } catch (error) {
-      reports.push({
-        applicationId: application?.id || null,
-        job: `${job.title || ''} — ${job.company || ''}`.trim(),
-        pageUrl: page.url(),
-        filledAt: new Date().toISOString(),
-        actions,
-        unknownRequired: [],
-        readyForReview: false,
-        error: error.message
-      });
+      reports.push(saveReport(failedReport({ runId, application, job, page, actions, error }), application));
     }
   }
+  await Promise.all(verificationTasks);
   console.log(JSON.stringify(reports, null, 2));
   console.log(`\n${reports.filter(report => report.readyForReview).length}/${reports.length} forms are fully filled; review the open browser tabs.`);
   await context.pages()[0]?.bringToFront();
@@ -260,4 +368,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { answerFor, isBlocked, fillInputs, fillCountrySelects, requiredUnknowns, hasHumanVerification };
+module.exports = {
+  answerFor,
+  isBlocked,
+  fillInputs,
+  fillCountrySelects,
+  requiredUnknowns,
+  hasHumanVerification,
+  applyCandidateScore,
+  applicationFieldCount,
+  isLoginGate
+};

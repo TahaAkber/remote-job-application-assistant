@@ -196,25 +196,6 @@ function fromHimalayas(job) {
   };
 }
 
-function fromJobicy(job) {
-  const description = cleanHtml(job.jobDescription || job.jobExcerpt);
-  return {
-    externalId: `jobicy:${job.id}`,
-    title: job.jobTitle,
-    company: job.companyName,
-    country: job.jobGeo || 'Remote / check listing',
-    url: job.url,
-    description,
-    skills: [...(job.jobIndustry || []), ...(job.jobType || []), job.jobLevel || ''].filter(Boolean).join(', '),
-    source: 'Jobicy',
-    sourceUrl: 'https://jobicy.com/',
-    remote: true,
-    publishedAt: job.pubDate || null,
-    employmentType: (job.jobType || []).join(', '),
-    applicationEmail: applicationEmail(job.jobDescription)
-  };
-}
-
 async function fetchRemotive() {
   const searches = ['react', 'node', 'full stack', 'next.js', 'react native', 'shopify'];
   const results = await Promise.all(searches.map(term => getJson(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(term)}`)));
@@ -236,12 +217,6 @@ async function fetchHimalayas() {
   return (result.jobs || []).map(fromHimalayas);
 }
 
-async function fetchJobicy() {
-  const tags = ['javascript', 'react', 'nodejs', 'full-stack', 'sql', 'shopify'];
-  const results = await Promise.all(tags.map(tag => getJson(`https://jobicy.com/api/v2/remote-jobs?count=50&tag=${encodeURIComponent(tag)}`)));
-  return results.flatMap(result => result.jobs || []).map(fromJobicy);
-}
-
 async function fetchWeWorkRemotely() {
   const xml = await getText('https://weworkremotely.com/categories/remote-programming-jobs.rss');
   return rssItems(xml).map(fromWeWorkRemotely).filter(job => job.title && job.url);
@@ -258,7 +233,6 @@ async function fetchLiveJobs() {
     ['Arbeitnow', fetchArbeitnow],
     ['RemoteOK', fetchRemoteOk],
     ['Himalayas', fetchHimalayas],
-    ['Jobicy', fetchJobicy],
     ['We Work Remotely', fetchWeWorkRemotely],
     ['Jobspresso', fetchJobspresso]
   ];

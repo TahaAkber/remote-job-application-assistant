@@ -14,6 +14,7 @@ const ROOT = __dirname;
 const DATA_DIR = process.env.VERCEL ? path.join(os.tmpdir(), 'taha-job-assistant') : path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 const CV_DIR = path.join(DATA_DIR, 'cv');
+const AUTOFILL_REPORT_DIR = path.join(DATA_DIR, 'autofill-reports');
 
 const initialData = {
   profile: {
@@ -183,18 +184,31 @@ async function api(req, res, url) {
     writeStore(store);
     return send(res, 201, { queuedCount: queued.length, dailyRemaining: Math.max(0, remaining - queued.length) });
   }
+  if (req.method === 'GET' && url.pathname === '/api/applications/autofill-batch') {
+    const runId = url.searchParams.get('runId');
+    if (!runId || !fs.existsSync(AUTOFILL_REPORT_DIR)) return send(res, 200, { reports: [] });
+    const reports = fs.readdirSync(AUTOFILL_REPORT_DIR)
+      .filter(name => name.endsWith('.json'))
+      .map(name => {
+        try { return JSON.parse(fs.readFileSync(path.join(AUTOFILL_REPORT_DIR, name), 'utf8')); }
+        catch { return null; }
+      })
+      .filter(report => report?.runId === runId);
+    return send(res, 200, { reports });
+  }
   if (req.method === 'POST' && url.pathname === '/api/applications/autofill-batch') {
     if (process.env.VERCEL) return send(res, 409, { error: 'Browser autofill is available only in the local app.' });
     const pending = store.applications.filter(item => ['approved', 'ready_for_review'].includes(item.status));
     if (!pending.length) return send(res, 409, { error: 'There are no pending applications to autofill.' });
-    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--queue'], {
+    const runId = randomUUID();
+    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--queue', '--run-id', runId], {
       cwd: ROOT,
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     });
     child.unref();
-    return send(res, 202, { started: true, applicationCount: pending.length });
+    return send(res, 202, { started: true, runId, applicationCount: pending.length });
   }
   if (req.method === 'POST' && url.pathname === '/api/applications') {
     const { jobId, note = '' } = await body(req);
@@ -214,18 +228,28 @@ async function api(req, res, url) {
     writeStore(store); return send(res, 200, application.emailDraft);
   }
   const autofillMatch = url.pathname.match(/^\/api\/applications\/([\w-]+)\/autofill$/);
+  if (req.method === 'GET' && autofillMatch) {
+    const reportFile = path.join(AUTOFILL_REPORT_DIR, `${autofillMatch[1]}.json`);
+    if (!fs.existsSync(reportFile)) return send(res, 200, { pending: true });
+    const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
+    if (url.searchParams.get('runId') && report.runId !== url.searchParams.get('runId')) {
+      return send(res, 200, { pending: true });
+    }
+    return send(res, 200, { pending: false, report });
+  }
   if (req.method === 'POST' && autofillMatch) {
     if (process.env.VERCEL) return send(res, 409, { error: 'Browser autofill is available only in the local app.' });
     const application = store.applications.find(item => item.id === autofillMatch[1]);
     if (!application) return send(res, 404, { error: 'Application not found.' });
-    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--application', application.id], {
+    const runId = randomUUID();
+    const child = spawn(process.execPath, [path.join(ROOT, 'auto-apply.js'), '--application', application.id, '--run-id', runId], {
       cwd: ROOT,
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     });
     child.unref();
-    return send(res, 202, { started: true });
+    return send(res, 202, { started: true, runId });
   }
   const applicationMatch = url.pathname.match(/^\/api\/applications\/([\w-]+)\/(approve|submit)$/);
   if (req.method === 'POST' && applicationMatch) {

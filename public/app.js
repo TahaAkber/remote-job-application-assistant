@@ -13,6 +13,24 @@ function escapeHtml(value = '') { const element = document.createElement('div');
 function formatDate(value) { return value ? new Date(value).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Date not supplied'; }
 function localData() { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)) || {}; } catch { return {}; } }
 function saveLocal() { localStorage.setItem(LOCAL_KEY, JSON.stringify({ profile: state.profile, settings: state.settings, applications: state.applications })); }
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+async function waitForAutofillReport(applicationId, runId) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    await wait(1500);
+    const result = await request(`/api/applications/${applicationId}/autofill?runId=${encodeURIComponent(runId)}`);
+    if (!result.pending) return result.report;
+  }
+  throw new Error('Autofill is still running. Check the open browser for a login or verification step.');
+}
+async function waitForBatchReports(runId, expectedCount, onProgress) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    await wait(1500);
+    const result = await request(`/api/applications/autofill-batch?runId=${encodeURIComponent(runId)}`);
+    onProgress(result.reports.length);
+    if (result.reports.length >= expectedCount) return result.reports;
+  }
+  throw new Error('Batch autofill is still running. Check the open browser for a login or verification step.');
+}
 function clientEmailDraft(profile, job) {
   return {
     to: job.applicationEmail,
@@ -94,10 +112,17 @@ function renderQueue() {
       if (actionName === 'autofill') {
         actionButton.disabled = true;
         try {
-          await request(`/api/applications/${application.id}/autofill`, { method: 'POST' });
-          actionButton.textContent = 'Browser opened';
+          const started = await request(`/api/applications/${application.id}/autofill`, { method: 'POST' });
+          actionButton.textContent = 'Finding application form…';
+          const report = await waitForAutofillReport(application.id, started.runId);
+          if (report.error) throw new Error(report.error);
+          actionButton.textContent = report.readyForReview
+            ? `Filled (${report.actions.length} actions)`
+            : `Needs answers (${report.unknownRequired.length})`;
         } catch (error) {
           actionButton.disabled = false;
+          actionButton.textContent = 'Retry autofill';
+          actionButton.title = error.message;
           alert(error.message);
         }
         return;
@@ -147,9 +172,17 @@ $('#autofill-queue').onclick = async () => {
   button.disabled = true;
   try {
     const result = await request('/api/applications/autofill-batch', { method: 'POST' });
-    button.textContent = `Opening ${result.applicationCount} forms…`;
+    button.textContent = `Processing 0/${result.applicationCount}…`;
+    const reports = await waitForBatchReports(result.runId, result.applicationCount, completed => {
+      button.textContent = `Processing ${completed}/${result.applicationCount}…`;
+    });
+    const filled = reports.filter(report => !report.error && report.actions.length).length;
+    const blocked = reports.filter(report => report.error).length;
+    button.textContent = `Done: ${filled} filled, ${blocked} blocked`;
+    if (blocked) alert(reports.filter(report => report.error).map(report => `${report.job}: ${report.error}`).join('\n\n'));
   } catch (error) {
     button.disabled = false;
+    button.textContent = 'Autofill all queued forms';
     alert(error.message);
   }
 };
